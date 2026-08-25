@@ -37,6 +37,18 @@ chmod +x install.sh uninstall.sh
 
 This sets up a background service that starts automatically on login, and adds a "Night Light Preferences" entry to your app menu.
 
+## Setting a keyboard shortcut
+
+Night Light deliberately doesn't bind a global hotkey on its own - a script silently grabbing system-wide keys would be a bad idea. You assign one yourself, once, using your desktop's own shortcut settings. `install.sh` prints the exact command to use at the end - it'll look something like this:
+
+- **Unity / GNOME**: `Settings -> Keyboard -> Shortcuts -> Custom Shortcuts -> (+)`
+  - Command: exactly what `install.sh` printed (something like `/usr/bin/python3 /home/you/nightlight/nightlight_settings.py`)
+  - Assign any key combo, e.g. `Super+N`
+- **KDE**: `System Settings -> Shortcuts -> Custom Shortcuts`, same command
+- **Other window managers** (i3, sway, etc.): bind the same command in your WM's own config, or via a tool like `xbindkeys`
+
+This opens the full Preferences window - mode, temperature, schedule, intensity - not a quick-toggle popup.
+
 ## Usage
 
 - **Tray icon** (if present): right-click for Off / Always On / Scheduled, Preferences, or Quit
