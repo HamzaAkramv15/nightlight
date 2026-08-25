@@ -1,0 +1,13 @@
+[Unit]
+Description=Night Light daemon (XRandR-based color temperature)
+After=graphical-session.target
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__PYTHON__ __NIGHTLIGHT_DIR__/nightlight_daemon.py
+ExecStop=__PYTHON__ -c "import sys; sys.path.insert(0, '__NIGHTLIGHT_DIR__'); import nightlight_common; nightlight_common.reset()"
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

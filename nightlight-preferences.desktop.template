@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Night Light Preferences
+Comment=Configure Night Light color temperature and schedule
+Exec=__PYTHON__ __NIGHTLIGHT_DIR__/nightlight_settings.py
+Icon=weather-clear-night-symbolic
+Terminal=false
+Categories=Settings;
