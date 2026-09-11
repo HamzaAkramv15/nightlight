@@ -9,19 +9,24 @@ The white-point table below is Redshift's actual published table
 calculated blackbody data, sampled at 100K intervals from 1000K to
 10000K.
 """
+import fcntl
 import json
 import os
-from datetime import datetime, time as dtime
+from datetime import datetime, timedelta, time as dtime
 
 SETTINGS_DIR = os.path.expanduser("~/.config/nightlight")
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, "settings.json")
+_LOCK_FILE = os.path.join(SETTINGS_DIR, "daemon.lock")
 
 DEFAULT_SETTINGS = {
     "mode": "off",
     "night_temp": 3400,
+    "day_temp": 6500,
     "schedule_start": "19:00",
     "schedule_end": "07:00",
-    "intensity": 1.0,  # 1.0 = Redshift's real values, lower = subtler, higher = stronger
+    "intensity": 1.0,       # 1.0 = Redshift's real values, lower = subtler, higher = stronger
+    "transition_seconds": 2,  # how long a typical day<->night fade takes; 0 = instant
+    "pause_until": None,    # ISO timestamp string, or None - see set_pause()/is_paused()
 }
 
 # Redshift's real white-point table (R, G, B as 0.0-1.0 multipliers),
@@ -132,6 +137,14 @@ def load_settings():
         with open(SETTINGS_FILE, "r") as f:
             saved = json.load(f)
     except (json.JSONDecodeError, OSError):
+        # Preserve the broken file for inspection instead of silently
+        # discarding whatever was in it, then recover with fresh defaults
+        # so the daemon/settings window still start up cleanly.
+        try:
+            os.replace(SETTINGS_FILE, SETTINGS_FILE + ".broken")
+        except OSError:
+            pass
+        save_settings(DEFAULT_SETTINGS)
         return dict(DEFAULT_SETTINGS)
     settings = dict(DEFAULT_SETTINGS)
     settings.update(saved)
@@ -139,9 +152,81 @@ def load_settings():
 
 
 def save_settings(settings):
+    """Atomic write: write to a temp file, fsync, then rename over the
+    real file. os.replace() is atomic on POSIX, so a crash or power loss
+    mid-write can never leave settings.json truncated or half-written -
+    worst case, the tmp file is orphaned and the previous good file is
+    untouched."""
     os.makedirs(SETTINGS_DIR, exist_ok=True)
-    with open(SETTINGS_FILE, "w") as f:
+    tmp_path = SETTINGS_FILE + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(settings, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, SETTINGS_FILE)
+
+
+def acquire_single_instance_lock():
+    """Returns an open file handle holding an exclusive lock if this is
+    the only Night Light daemon running, or None if another instance
+    already holds it. The caller must keep the returned handle alive
+    for the process's entire lifetime (the lock releases automatically
+    when the file descriptor closes, e.g. on process exit) - don't let
+    it get garbage collected early."""
+    os.makedirs(SETTINGS_DIR, exist_ok=True)
+    lock_handle = open(_LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_handle.close()
+        return None
+    lock_handle.write(str(os.getpid()))
+    lock_handle.flush()
+    return lock_handle
+
+
+def set_pause(minutes):
+    """Temporarily force neutral (no adjustment) for `minutes`, regardless
+    of the current mode. Automatically expires - see is_paused()."""
+    settings = load_settings()
+    until = datetime.now() + timedelta(minutes=minutes)
+    settings["pause_until"] = until.isoformat()
+    save_settings(settings)
+
+
+def clear_pause(settings=None):
+    """Ends an active pause immediately. Pass an already-loaded settings
+    dict to avoid a redundant load_settings() call when the caller has
+    one handy; otherwise loads and saves on its own."""
+    owns_settings = settings is None
+    if owns_settings:
+        settings = load_settings()
+    if settings.get("pause_until"):
+        settings["pause_until"] = None
+        if owns_settings:
+            save_settings(settings)
+    return settings
+
+
+def is_paused(settings):
+    """Checks (and self-expires) an active pause. Returns True if a pause
+    is currently in effect. If the stored pause_until has already passed,
+    clears it and persists that - so tray/UI state doesn't stay stuck
+    showing "Paused" forever after the timer actually ran out."""
+    pause_until = settings.get("pause_until")
+    if not pause_until:
+        return False
+    try:
+        until = datetime.fromisoformat(pause_until)
+    except ValueError:
+        settings["pause_until"] = None
+        save_settings(settings)
+        return False
+    if datetime.now() >= until:
+        settings["pause_until"] = None
+        save_settings(settings)
+        return False
+    return True
 
 
 def is_valid_time(text):
@@ -171,9 +256,51 @@ def compute_target_temp(settings):
             in_night_window = start <= now <= end
         else:
             in_night_window = now >= start or now <= end
-        return settings.get("night_temp", 3400) if in_night_window else 6500
+        return (
+            settings.get("night_temp", 3400)
+            if in_night_window
+            else settings.get("day_temp", 6500)
+        )
 
     return 6500
+
+
+# A "typical" day<->night swing (roughly 6500K to 3400K) used as the
+# reference distance for turning a human "X seconds" fade-speed setting
+# into a per-tick Kelvin step. It's a reference point, not a hard limit -
+# actual fades (e.g. day_temp to night_temp) can be shorter or longer than
+# this and will simply take proportionally less/more time at the same step.
+_REFERENCE_SWING_K = 3100
+
+
+def compute_step_per_tick(transition_seconds, tick_ms=100):
+    """How many Kelvin to move per daemon tick to make a ~_REFERENCE_SWING_K
+    fade take about `transition_seconds` seconds. transition_seconds <= 0
+    means "instant" - a single tick covers any realistic gap."""
+    if not transition_seconds or transition_seconds <= 0:
+        return 20000
+    ticks = max(1, transition_seconds * (1000 / tick_ms))
+    return max(1, round(_REFERENCE_SWING_K / ticks))
+
+
+def kelvin_to_label(kelvin):
+    """Human-friendly description of a Kelvin value, for display next to
+    the raw number in the UI/tray - most people think "warm", not "3800K"."""
+    if kelvin >= 8000:
+        return "Very Cool"
+    if kelvin >= 6700:
+        return "Cool"
+    if kelvin >= 6300:
+        return "Neutral"
+    if kelvin >= 5300:
+        return "Slightly Warm"
+    if kelvin >= 4300:
+        return "Warm"
+    if kelvin >= 3600:
+        return "Very Warm"
+    if kelvin >= 2900:
+        return "Candlelight"
+    return "Very Amber"
 
 
 def kelvin_to_rgb(temp_kelvin):
@@ -202,24 +329,26 @@ def apply_temperature(kelvin, intensity=1.0):
     intensity scales how far from neutral (1.0:1.0:1.0) we go:
     1.0 = exactly Redshift's real values, 0.5 = half as strong,
     1.5 = 50% stronger than Redshift's own default.
+
+    Works across the whole table range (1000-10000K), not just the
+    warm/night side - kelvin_to_rgb() already interpolates the cool
+    (>6500K, bluer) side correctly, so there's no need to special-case
+    it to flat neutral the way earlier versions of this function did.
     """
     from Xlib import display
     from Xlib.ext import randr
 
-    if kelvin < 6500:
-        r, g, b = kelvin_to_rgb(kelvin)
-        r = 1.0 + (r - 1.0) * intensity
-        g = 1.0 + (g - 1.0) * intensity
-        b = 1.0 + (b - 1.0) * intensity
-        # Intensity above 1.0 can push an already-extreme channel (like
-        # blue at very low Kelvin, which the table already has at 0.0)
-        # past zero into negative territory - not a valid gamma value.
-        # Clamp back into range rather than handing X11 something invalid.
-        r = max(0.0, min(2.0, r))
-        g = max(0.0, min(2.0, g))
-        b = max(0.0, min(2.0, b))
-    else:
-        r, g, b = 1.0, 1.0, 1.0
+    r, g, b = kelvin_to_rgb(kelvin)
+    r = 1.0 + (r - 1.0) * intensity
+    g = 1.0 + (g - 1.0) * intensity
+    b = 1.0 + (b - 1.0) * intensity
+    # Intensity above 1.0 can push an already-extreme channel (like
+    # blue at very low Kelvin, which the table already has at 0.0)
+    # past zero into negative territory - not a valid gamma value.
+    # Clamp back into range rather than handing X11 something invalid.
+    r = max(0.0, min(2.0, r))
+    g = max(0.0, min(2.0, g))
+    b = max(0.0, min(2.0, b))
 
     d = display.Display()
     screen = d.screen()

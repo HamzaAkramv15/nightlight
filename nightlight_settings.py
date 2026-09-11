@@ -71,34 +71,71 @@ class SettingsWindow(Gtk.Window):
         self.night_spin.set_range(1000, 10000)
         self.night_spin.set_increments(100, 500)
         self.night_spin.set_value(self.settings.get("night_temp", 3400))
-        grid.attach(self.night_spin, 1, 0, 1, 1)
+        self.night_label = Gtk.Label(label=common.kelvin_to_label(self.settings.get("night_temp", 3400)), xalign=0)
+        self.night_spin.connect("value-changed", self._update_temp_label, self.night_label)
+        night_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        night_box.pack_start(self.night_spin, False, False, 0)
+        night_box.pack_start(self.night_label, False, False, 0)
+        grid.attach(night_box, 1, 0, 1, 1)
 
-        grid.attach(Gtk.Label(label="Start time", xalign=0), 0, 1, 1, 1)
+        grid.attach(Gtk.Label(label="Day temperature (K)", xalign=0), 0, 1, 1, 1)
+        self.day_spin = Gtk.SpinButton()
+        self.day_spin.set_range(4000, 10000)
+        self.day_spin.set_increments(100, 500)
+        self.day_spin.set_value(self.settings.get("day_temp", 6500))
+        self.day_label_value = Gtk.Label(label=common.kelvin_to_label(self.settings.get("day_temp", 6500)), xalign=0)
+        self.day_spin.connect("value-changed", self._update_temp_label, self.day_label_value)
+        day_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        day_box.pack_start(self.day_spin, False, False, 0)
+        day_box.pack_start(self.day_label_value, False, False, 0)
+        grid.attach(day_box, 1, 1, 1, 1)
+
+        grid.attach(Gtk.Label(label="Start time", xalign=0), 0, 2, 1, 1)
         start_hour, start_minute, start_ampm, start_box = self.build_time_picker(
             self.settings.get("schedule_start", "19:00")
         )
         self.start_hour, self.start_minute, self.start_ampm = start_hour, start_minute, start_ampm
-        grid.attach(start_box, 1, 1, 1, 1)
+        grid.attach(start_box, 1, 2, 1, 1)
 
-        grid.attach(Gtk.Label(label="End time", xalign=0), 0, 2, 1, 1)
+        grid.attach(Gtk.Label(label="End time", xalign=0), 0, 3, 1, 1)
         end_hour, end_minute, end_ampm, end_box = self.build_time_picker(
             self.settings.get("schedule_end", "07:00")
         )
         self.end_hour, self.end_minute, self.end_ampm = end_hour, end_minute, end_ampm
-        grid.attach(end_box, 1, 2, 1, 1)
+        grid.attach(end_box, 1, 3, 1, 1)
 
-        grid.attach(Gtk.Label(label="Intensity", xalign=0), 0, 3, 1, 1)
+        grid.attach(Gtk.Label(label="Intensity", xalign=0), 0, 4, 1, 1)
         self.intensity_spin = Gtk.SpinButton()
         self.intensity_spin.set_range(0.0, 2.0)
         self.intensity_spin.set_digits(2)
         self.intensity_spin.set_increments(0.1, 0.5)
         self.intensity_spin.set_value(self.settings.get("intensity", 1.0))
-        grid.attach(self.intensity_spin, 1, 3, 1, 1)
+        grid.attach(self.intensity_spin, 1, 4, 1, 1)
+
+        grid.attach(Gtk.Label(label="Transition speed", xalign=0), 0, 5, 1, 1)
+        self.transition_combo = Gtk.ComboBoxText()
+        self._transition_options = [
+            ("Instant", 0), ("Fast (2s)", 2), ("Slow (10s)", 10),
+            ("Very slow (30s)", 30), ("Extra slow (1 min)", 60),
+        ]
+        current_transition = self.settings.get("transition_seconds", 2)
+        active_index = 0
+        for i, (label, seconds) in enumerate(self._transition_options):
+            self.transition_combo.append_text(label)
+            if seconds == current_transition:
+                active_index = i
+        self.transition_combo.set_active(active_index)
+        grid.attach(self.transition_combo, 1, 5, 1, 1)
 
         # Keep references so we can hide these unless "Scheduled" is picked.
-        self.start_label = grid.get_child_at(0, 1)
-        self.end_label = grid.get_child_at(0, 2)
-        self.schedule_widgets = [self.start_label, start_box, self.end_label, end_box]
+        self.day_label = grid.get_child_at(0, 1)
+        self.start_label = grid.get_child_at(0, 2)
+        self.end_label = grid.get_child_at(0, 3)
+        self.schedule_widgets = [
+            self.day_label, day_box,
+            self.start_label, start_box,
+            self.end_label, end_box,
+        ]
 
         for radio in (self.off_radio, self.on_radio, self.schedule_radio):
             radio.connect("toggled", self.on_mode_toggled)
@@ -157,6 +194,9 @@ class SettingsWindow(Gtk.Window):
         spin_button.set_text(f"{int(spin_button.get_value()):02d}")
         return True
 
+    def _update_temp_label(self, spin_button, label_widget):
+        label_widget.set_text(common.kelvin_to_label(int(spin_button.get_value())))
+
     def on_mode_toggled(self, button):
         is_schedule = self.schedule_radio.get_active()
         for widget in self.schedule_widgets:
@@ -175,9 +215,13 @@ class SettingsWindow(Gtk.Window):
 
         self.settings["mode"] = mode
         self.settings["night_temp"] = int(self.night_spin.get_value())
+        self.settings["day_temp"] = int(self.day_spin.get_value())
         self.settings["schedule_start"] = start_text
         self.settings["schedule_end"] = end_text
         self.settings["intensity"] = round(self.intensity_spin.get_value(), 2)
+        self.settings["transition_seconds"] = self._transition_options[
+            self.transition_combo.get_active()
+        ][1]
 
         common.save_settings(self.settings)
         # Don't apply directly here - the daemon's own fade loop will
